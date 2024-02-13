@@ -1,0 +1,227 @@
+# Load libraries
+library(tidyverse)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(EnhancedVolcano)
+
+# Set working directory
+setwd("~/Desktop/Lab things/RNAseq")
+
+# Import data and create a new data field with it
+phage_exp <- read_csv("raw_counts_v2.csv")
+
+# Remove column 2
+phage_exp2 <- phage_exp[c(1:60623), c(1, 3:14)]
+
+# Make gene id the row title
+phage_exp3 <- column_to_rownames(phage_exp2, "Geneid")
+
+# Treatments are defined as factors for EdgeR
+phage_treatment <- factor(c("Untreated", "OMKO1", "OMKO1", "LPS5", "LPS5", "PSA34", "PSA34", "PSA34","PSA04", "PSA04", "Untreated", "OMKO1"))
+
+# Differential gene expression analysis with EdgeR
+DGE <- DGEList(counts = phage_exp3, remove.zeros = TRUE, genes = rownames(phage_exp3), group = phage_treatment)
+
+# Check library size. If different per sample, will need to normalize
+DGE$samples
+
+# Fix table, make columns more informative
+colnames(DGE$counts)
+data.frame(Sample = colnames(DGE), phage_treatment)
+
+# Create design matrix. It will inform the DGE object of which samples will be reference conditions
+design <- model.matrix(~ 0+phage_treatment)
+rownames(design) <- colnames(DGE)
+design
+
+# Remove low expression genes and identify well-expressed genes:
+keep <- filterByExpr(DGE, design, min.count = 10, min.total.count = 15)
+
+# Keep genes that meet that threshold
+DGE <- DGE[keep, ] 
+
+# Normalize for different library sizes (TMM, trimmed mean of M-values)
+DGE <- calcNormFactors(DGE) 
+DGE$samples
+
+# calculate overall dispersion
+DGE <- estimateGLMCommonDisp(DGE, design, verbose = TRUE) 
+
+# calculate dispersion trend based on gene abundance
+DGE <- estimateGLMTrendedDisp(DGE, design) 
+
+# calculate separate dispersion for each gene
+DGE <- estimateGLMTagwiseDisp(DGE, design)
+
+## Visualizing dispersion
+plotBCV(DGE)
+
+# Did the normalization work?
+CPM <- cpm(DGE, normalized.lib.sizes = TRUE, log = TRUE)
+CPM <- as.data.frame(CPM)
+write.csv(CPM, file = "CPM_paper.csv", row.names = TRUE)
+
+# Visualize normalized data
+boxplot(CPM, las = 2, ylab = "log2 CPM", main = "Normalized Data")
+
+# Fit a gene-wise negative binomial generalized linear model
+glmfit <- glmFit(DGE, design)
+colnames(glmfit$coefficients)
+
+# Conduct likelihood ratio test to identify DE genes of phage treatment
+# Make contrasts
+LPS5 <- makeContrasts(phage_treatmentLPS5-phage_treatmentUntreated, levels = design)
+OMKO1 <- makeContrasts(phage_treatmentOMKO1-phage_treatmentUntreated, levels = design)
+PSA34 <- makeContrasts(phage_treatmentPSA34-phage_treatmentUntreated, levels = design)
+PSA04 <- makeContrasts(phage_treatmentPSA04-phage_treatmentUntreated, levels = design)
+
+my.contrasts <- makeContrasts(LPS5, OMKO1, PSA34, PSA04, levels = design)
+
+OMKO1_glmLRT <- glmLRT(glmfit, contrast = OMKO1) 
+topTags(OMKO1_glmLRT)
+
+LPS5_glmLRT <- glmLRT(glmfit, contrast = LPS5) 
+topTags(LPS5_glmLRT)
+
+PSA04_glmLRT <- glmLRT(glmfit, contrast = PSA04) 
+topTags(PSA04_glmLRT)
+
+PSA34_glmLRT <- glmLRT(glmfit, contrast = PSA34) 
+topTags(PSA34_glmLRT)
+
+# Export results
+Results_OMKO1 <- as.data.frame(topTags(OMKO1_glmLRT, n = dim(DGE)[1]))
+write.csv(Results_OMKO1, file = "edgeR_Results_OMKO1.csv", row.names = FALSE)
+
+Results_LPS5 <- as.data.frame(topTags(LPS5_glmLRT, n = dim(DGE)[1]))
+write.csv(Results_LPS5, file = "edgeR_Results_LPS5.csv", row.names = FALSE)
+
+Results_PSA04 <- as.data.frame(topTags(PSA04_glmLRT, n = dim(DGE)[1]))
+write.csv(Results_PSA04, file = "edgeR_Results_PSA04.csv", row.names = FALSE)
+
+Results_PSA34 <- as.data.frame(topTags(PSA34_glmLRT, n = dim(DGE)[1]))
+write.csv(Results_PSA34, file = "edgeR_Results_PSA34.csv", row.names = FALSE)
+
+# Create volcano plots
+keyvals <- ifelse(Results_OMKO1$logFC < -1.5 & Results_OMKO1$PValue < 1e-3, 'blue', ifelse(Results_OMKO1$logFC > 1.5 & Results_OMKO1$PValue < 1e-3, 'red', 'grey50'))
+keyvals[is.na(keyvals)] <- 'grey50'
+names(keyvals)[keyvals == 'blue'] <- 'Down-Regulated'
+names(keyvals)[keyvals == 'grey50'] <- 'NS'
+names(keyvals)[keyvals == 'red'] <- 'Up-Regulated'
+
+EnhancedVolcano(Results_OMKO1, 
+                lab = Results_OMKO1$genes, 
+                x = "logFC", 
+                y = "PValue", 
+                FCcutoff = 1.5,
+                pCutoff = 1e-3,
+                xlim = c(-5.5, 5.5),
+                ylim = c(0, -log10(1e-16)),
+                axisLabSize = 16, 
+                pointSize = 5,
+                labSize = 5,
+                title = 'OMKO1 vs Untreated',
+                caption = 'FC cutoff, 1.5; p-value cutoff, 1e-3',
+                legendPosition = "right",
+                legendLabSize = 14,
+                colCustom = keyvals,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.25, 
+                max.overlaps = Inf,
+                endsConnectors = 'last',
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE)
+
+keyvals2 <- ifelse(Results_LPS5$logFC < -1.5 & Results_LPS5$PValue < 1e-3, 'blue', ifelse(Results_LPS5$logFC > 1.5 & Results_LPS5$PValue < 1e-3, 'red', 'grey50'))
+keyvals2[is.na(keyvals2)] <- 'grey50'
+names(keyvals2)[keyvals2 == 'blue'] <- 'Down-Regulated'
+names(keyvals2)[keyvals2 == 'grey50'] <- 'NS'
+names(keyvals2)[keyvals2 == 'red'] <- 'Up-Regulated'
+
+EnhancedVolcano(Results_LPS5, 
+                lab = Results_LPS5$genes, 
+                x = "logFC", 
+                y = "PValue", 
+                FCcutoff = 1.5,
+                pCutoff = 1e-3,
+                xlim = c(-5.5, 5.5),
+                ylim = c(0, -log10(1e-16)),
+                axisLabSize = 16, 
+                pointSize = 5,
+                labSize = 5,
+                title = 'LPS5 vs Untreated',
+                caption = 'FC cutoff, 1.5; p-value cutoff, 1e-3',
+                legendPosition = "right",
+                legendLabSize = 14,
+                colCustom = keyvals2,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.25, 
+                max.overlaps = Inf,
+                endsConnectors = 'last',
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE)
+
+keyvals3 <- ifelse(Results_PSA04$logFC < -1.5 & Results_PSA04$PValue < 1e-3, 'blue', ifelse(Results_PSA04$logFC > 1.5 & Results_PSA04$PValue < 1e-3, 'red', 'grey50'))
+keyvals3[is.na(keyvals3)] <- 'grey50'
+names(keyvals3)[keyvals3 == 'blue'] <- 'Down-Regulated'
+names(keyvals3)[keyvals3 == 'grey50'] <- 'NS'
+names(keyvals3)[keyvals3 == 'red'] <- 'Up-Regulated'
+
+EnhancedVolcano(Results_PSA04, 
+                lab = Results_PSA04$genes, 
+                x = "logFC", 
+                y = "PValue", 
+                FCcutoff = 1.5,
+                pCutoff = 1e-3,
+                xlim = c(-5.5, 5.5),
+                ylim = c(0, -log10(1e-16)),
+                axisLabSize = 16, 
+                pointSize = 5,
+                labSize = 5,
+                title = 'PSA04 vs Untreated',
+                caption = 'FC cutoff, 1.5; p-value cutoff, 1e-3',
+                legendPosition = "right",
+                legendLabSize = 14,
+                colCustom = keyvals3,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.25, 
+                max.overlaps = Inf,
+                endsConnectors = 'last',
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE)
+
+keyvals4 <- ifelse(Results_PSA34$logFC < -1.5 & Results_PSA34$PValue < 1e-3, 'blue', ifelse(Results_PSA34$logFC > 1.5 & Results_PSA34$PValue < 1e-3, 'red', 'grey50'))
+keyvals4[is.na(keyvals4)] <- 'grey50'
+names(keyvals4)[keyvals4 == 'blue'] <- 'Down-Regulated'
+names(keyvals4)[keyvals4 == 'grey50'] <- 'NS'
+names(keyvals4)[keyvals4 == 'red'] <- 'Up-Regulated'
+
+EnhancedVolcano(Results_PSA34, 
+                lab = Results_PSA34$genes, 
+                x = "logFC", 
+                y = "PValue", 
+                FCcutoff = 1.5,
+                pCutoff = 1e-3,
+                xlim = c(-5.5, 5.5),
+                ylim = c(0, -log10(1e-16)),
+                axisLabSize = 16, 
+                pointSize = 5,
+                labSize = 5,
+                title = 'PSA34 vs Untreated',
+                caption = 'FC cutoff, 1.5; p-value cutoff, 1e-3',
+                legendPosition = "right",
+                legendLabSize = 14,
+                colCustom = keyvals4,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.25, 
+                max.overlaps = Inf,
+                endsConnectors = 'last',
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE)
+
